@@ -94,7 +94,13 @@ export default function LoginForm() {
           </button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-slate-600">
+        <div className="mt-4 text-center">
+          <Link href="/forgot-password" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
+            Forgot your password?
+          </Link>
+        </div>
+
+        <p className="mt-4 text-center text-sm text-slate-600">
           Don&apos;t have an account?{' '}
           <Link href="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
             Sign up
