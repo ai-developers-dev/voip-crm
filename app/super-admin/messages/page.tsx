@@ -131,34 +131,68 @@ export default function MessagesPage() {
 
   // Send message
   const handleSend = async () => {
-    if (!newMessage.trim() || !selectedConversationId) return
+    console.log('📤 SMS: handleSend called', {
+      newMessage: newMessage?.substring(0, 50),
+      selectedConversationId,
+      conversationsCount: conversations.length
+    })
+
+    if (!newMessage.trim() || !selectedConversationId) {
+      console.log('📤 SMS: Early return - missing message or conversation', {
+        hasMessage: !!newMessage.trim(),
+        hasConversationId: !!selectedConversationId
+      })
+      return
+    }
 
     const conversation = conversations.find(c => c.id === selectedConversationId)
-    if (!conversation) return
+    console.log('📤 SMS: Found conversation', {
+      found: !!conversation,
+      contact_id: conversation?.contact_id
+    })
+
+    if (!conversation) {
+      console.log('📤 SMS: Early return - conversation not found')
+      return
+    }
 
     setIsSending(true)
     try {
+      const session = await supabase.auth.getSession()
+      console.log('📤 SMS: Got session', { hasToken: !!session.data.session?.access_token })
+
+      const requestBody = {
+        contact_id: conversation.contact_id,
+        message: newMessage
+      }
+      console.log('📤 SMS: Sending request', requestBody)
+
       const response = await fetch('/api/sms/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}`
+          'Authorization': `Bearer ${session.data.session?.access_token}`
         },
-        body: JSON.stringify({
-          contact_id: conversation.contact_id,
-          message: newMessage
-        })
+        body: JSON.stringify(requestBody)
+      })
+
+      console.log('📤 SMS: Response received', {
+        status: response.status,
+        ok: response.ok
       })
 
       if (response.ok) {
+        const result = await response.json()
+        console.log('📤 SMS: Success!', result)
         setNewMessage('')
         // Message will appear via realtime subscription
       } else {
         const error = await response.json()
+        console.error('📤 SMS: Failed', error)
         alert(`Failed to send: ${error.error}`)
       }
     } catch (error) {
-      console.error('Error sending message:', error)
+      console.error('📤 SMS: Exception', error)
       alert('Failed to send message')
     } finally {
       setIsSending(false)
