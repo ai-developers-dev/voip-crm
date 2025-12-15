@@ -61,7 +61,7 @@ export async function GET(
     }
 
     // Filter calls by matching phone numbers with normalization
-    const callHistory = allCalls?.filter(call => {
+    const filteredCalls = allCalls?.filter(call => {
       const normalizedFrom = call.from_number?.replace(/[\s\-+]/g, '') || ''
       const normalizedTo = call.to_number?.replace(/[\s\-+]/g, '') || ''
 
@@ -76,18 +76,53 @@ export async function GET(
       return matchFrom || matchTo
     }).slice(0, 20) || []
 
+    // Fetch user data for agents who answered/made calls
+    const { data: allUsers } = await supabase
+      .from('voip_users')
+      .select('id, full_name')
+
+    // Create users map
+    const usersMap: Record<string, { full_name: string }> = {}
+    allUsers?.forEach((user: any) => {
+      if (user.id && user.full_name) {
+        usersMap[user.id] = { full_name: user.full_name }
+      }
+    })
+
+    // Merge user data with calls
+    const callHistory = filteredCalls?.map(call => ({
+      ...call,
+      answered_by_user: call.answered_by_user_id ? usersMap[call.answered_by_user_id] : undefined
+    })) || []
+
     console.log('📞 Found', callHistory.length, 'calls')
 
-    // Fetch SMS messages for this contact
-    const { data: smsMessages, error: smsError } = await supabase
-      .from('sms_messages')
-      .select('*')
-      .eq('conversation_id', contact.phone)
-      .order('created_at', { ascending: false })
-      .limit(50)
+    // First, get the SMS conversation for this contact
+    const { data: conversation, error: convError } = await supabase
+      .from('sms_conversations')
+      .select('id')
+      .eq('contact_id', contactId)
+      .single()
 
-    if (smsError) {
-      console.error('Error fetching SMS messages:', smsError)
+    if (convError && convError.code !== 'PGRST116') {
+      console.error('Error fetching SMS conversation:', convError)
+    }
+
+    let smsMessages = []
+    if (conversation) {
+      // Fetch SMS messages using the conversation ID
+      const { data: messages, error: smsError } = await supabase
+        .from('sms_messages')
+        .select('*')
+        .eq('conversation_id', conversation.id)
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (smsError) {
+        console.error('Error fetching SMS messages:', smsError)
+      } else {
+        smsMessages = messages || []
+      }
     }
 
     console.log('📱 Found', smsMessages?.length || 0, 'SMS messages')

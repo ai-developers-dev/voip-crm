@@ -35,6 +35,11 @@ interface Call {
   answered_at: string | null
   ended_at: string | null
   created_at: string
+  direction: string
+  answered_by_user_id: string | null
+  answered_by_user?: {
+    full_name: string
+  }
 }
 
 interface SMSMessage {
@@ -42,7 +47,7 @@ interface SMSMessage {
   conversation_id: string
   from_number: string
   to_number: string
-  message_body: string
+  body: string
   direction: 'inbound' | 'outbound'
   status: string
   created_at: string
@@ -109,13 +114,25 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
         setIsLoading(true)
         setError(null)
 
-        const response = await fetch(`/api/contacts/${params.id}`)
+        const response = await fetch(`/api/contacts/${params.id}`, {
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache'
+          }
+        })
         const data = await response.json()
 
         if (!response.ok) {
           setError(data.error || 'Failed to load contact')
           return
         }
+
+        console.log('📊 Contact API response:', {
+          contactId: data.contact?.id,
+          callHistoryCount: data.callHistory?.length || 0,
+          smsHistoryCount: data.smsHistory?.length || 0,
+          calls: data.callHistory
+        })
 
         setContact(data.contact)
         setCallHistory(data.callHistory || [])
@@ -151,6 +168,118 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
 
     fetchContact()
   }, [params.id])
+
+  // Subscribe to real-time updates for calls and SMS
+  useEffect(() => {
+    if (!contact) return
+
+    console.log('📡 Setting up real-time subscriptions for contact:', contact.id)
+
+    // Subscribe to calls table changes
+    const callsChannel = supabase
+      .channel('contact-calls-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'calls',
+        },
+        (payload) => {
+          console.log('📞 Call update detected:', payload)
+          // Refetch contact data to get updated call history
+          const refetch = async () => {
+            const response = await fetch(`/api/contacts/${params.id}`, {
+              cache: 'no-store',
+              headers: {
+                'Cache-Control': 'no-cache'
+              }
+            })
+            const data = await response.json()
+
+            setCallHistory(data.callHistory || [])
+            setSmsHistory(data.smsHistory || [])
+
+            // Update unified history
+            const callItems: HistoryItem[] = (data.callHistory || []).map((call: Call) => ({
+              type: 'call' as const,
+              data: call,
+              timestamp: call.created_at
+            }))
+
+            const smsItems: HistoryItem[] = (data.smsHistory || []).map((sms: SMSMessage) => ({
+              type: 'sms' as const,
+              data: sms,
+              timestamp: sms.created_at
+            }))
+
+            const combined = [...callItems, ...smsItems].sort((a, b) =>
+              new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+            )
+
+            setUnifiedHistory(combined)
+            console.log('✅ History refreshed:', combined.length, 'items')
+          }
+          refetch()
+        }
+      )
+      .subscribe()
+
+    // Subscribe to SMS messages table changes
+    const smsChannel = supabase
+      .channel('contact-sms-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'sms_messages',
+        },
+        (payload) => {
+          console.log('📱 SMS update detected:', payload)
+          // Refetch contact data to get updated SMS history
+          const refetch = async () => {
+            const response = await fetch(`/api/contacts/${params.id}`, {
+              cache: 'no-store',
+              headers: {
+                'Cache-Control': 'no-cache'
+              }
+            })
+            const data = await response.json()
+
+            setCallHistory(data.callHistory || [])
+            setSmsHistory(data.smsHistory || [])
+
+            // Update unified history
+            const callItems: HistoryItem[] = (data.callHistory || []).map((call: Call) => ({
+              type: 'call' as const,
+              data: call,
+              timestamp: call.created_at
+            }))
+
+            const smsItems: HistoryItem[] = (data.smsHistory || []).map((sms: SMSMessage) => ({
+              type: 'sms' as const,
+              data: sms,
+              timestamp: sms.created_at
+            }))
+
+            const combined = [...callItems, ...smsItems].sort((a, b) =>
+              new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+            )
+
+            setUnifiedHistory(combined)
+            console.log('✅ History refreshed:', combined.length, 'items')
+          }
+          refetch()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(callsChannel)
+      supabase.removeChannel(smsChannel)
+    }
+  }, [contact, params.id, supabase])
 
   const handleDelete = async () => {
     if (!contact) return
@@ -272,7 +401,16 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
     return phone
   }
 
-  const formatDuration = (seconds: number | null) => {
+  const formatDuration = (call: Call) => {
+    let seconds = call.duration
+
+    // If duration is null but we have answered_at and ended_at, calculate it
+    if (!seconds && call.answered_at && call.ended_at) {
+      const answeredTime = new Date(call.answered_at).getTime()
+      const endedTime = new Date(call.ended_at).getTime()
+      seconds = Math.floor((endedTime - answeredTime) / 1000)
+    }
+
     if (!seconds) return 'N/A'
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
@@ -486,7 +624,7 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
               {unifiedHistory.map((item) => {
                 if (item.type === 'call') {
                   const call = item.data as Call
-                  const isInbound = call.to_number !== contact.phone
+                  const isInbound = call.direction === 'inbound'
                   return (
                     <div
                       key={call.id}
@@ -501,17 +639,19 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
                           </svg>
                         </div>
                         <div>
-                          <div className="flex items-center gap-2">
-                            <p className="font-semibold text-slate-900">
-                              {isInbound ? 'Inbound Call' : 'Outbound Call'}
+                          <p className="font-semibold text-slate-900">
+                            {isInbound ? 'Inbound Call' : 'Outbound Call'}
+                          </p>
+                          {call.answered_by_user_id && call.answered_by_user?.full_name && (
+                            <p className="text-xs text-slate-500">
+                              {isInbound ? 'Answered by' : 'Called by'} {call.answered_by_user.full_name}
                             </p>
-                            <span className="text-xs text-slate-500">📞</span>
-                          </div>
+                          )}
                           <p className="text-sm text-slate-600">{formatDate(call.created_at)}</p>
                         </div>
                       </div>
                       <div className="text-right">
-                        <p className="font-medium text-slate-900">{formatDuration(call.duration)}</p>
+                        <p className="font-medium text-slate-900">{formatDuration(call)}</p>
                         <p className={`text-sm font-medium ${
                           call.status === 'completed' ? 'text-green-600' : 'text-slate-500'
                         }`}>
@@ -544,7 +684,7 @@ export default function ContactDetailsPage({ params }: { params: { id: string } 
                         </div>
                         <p className="text-sm text-slate-600 mb-2">{formatDate(sms.created_at)}</p>
                         <p className="text-sm text-slate-700 bg-slate-50 rounded-lg p-3 border border-slate-100">
-                          {sms.message_body}
+                          {sms.body}
                         </p>
                       </div>
                     </div>

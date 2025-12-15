@@ -18,6 +18,7 @@ interface CallRecord {
   direction: string
   answered_by_user_id: string | null
   answered_at: string | null
+  ended_at: string | null
   created_at: string
   duration: number | null
   answered_by_user?: {
@@ -51,6 +52,7 @@ export default function CallHistoryCard() {
           direction,
           answered_by_user_id,
           answered_at,
+          ended_at,
           created_at,
           duration
         `)
@@ -180,7 +182,16 @@ export default function CallHistoryCard() {
     return phone.replace('+', '')
   }
 
-  const formatDuration = (seconds: number | null) => {
+  const formatDuration = (call: CallRecord) => {
+    let seconds = call.duration
+
+    // If duration is null but we have answered_at and ended_at, calculate it
+    if (!seconds && call.answered_at && call.ended_at) {
+      const answeredTime = new Date(call.answered_at).getTime()
+      const endedTime = new Date(call.ended_at).getTime()
+      seconds = Math.floor((endedTime - answeredTime) / 1000)
+    }
+
     if (!seconds) return 'N/A'
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
@@ -188,21 +199,64 @@ export default function CallHistoryCard() {
   }
 
   const formatDateTime = (dateString: string) => {
-    const date = new Date(dateString)
-    const now = new Date()
-    const diff = now.getTime() - date.getTime()
-    const minutes = Math.floor(diff / 60000)
-    const hours = Math.floor(diff / 3600000)
-    const days = Math.floor(diff / 86400000)
-
-    if (minutes < 1) return 'Just now'
-    if (minutes < 60) return `${minutes}m ago`
-    if (hours < 24) return `${hours}h ago`
-    if (days < 7) return `${days}d ago`
-    return date.toLocaleDateString()
+    return new Date(dateString).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    })
   }
 
   const getStatusInfo = (call: CallRecord) => {
+    // For outbound calls, check status and duration, NOT answered_by_user_id
+    // (answered_by_user_id for outbound = who made the call, not who answered)
+    if (call.direction === 'outbound') {
+      if (call.status === 'busy') {
+        return {
+          type: 'busy',
+          label: 'Busy',
+          color: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+          icon: '🔕'
+        }
+      }
+      if (call.status === 'no-answer' || call.status === 'canceled' || (call.status === 'ringing' && !call.duration)) {
+        return {
+          type: 'no-answer',
+          label: 'No Answer',
+          color: 'bg-red-100 text-red-700 border-red-200',
+          icon: '📵'
+        }
+      }
+      // For completed outbound calls with short duration (< 10 seconds), likely voicemail
+      if (call.status === 'completed' && call.duration && call.duration < 10) {
+        return {
+          type: 'not-completed',
+          label: 'Not Completed',
+          color: 'bg-red-100 text-red-700 border-red-200',
+          icon: '📵'
+        }
+      }
+      // For completed outbound calls with longer duration (actual conversation)
+      if (call.status === 'completed' && call.duration && call.duration >= 10) {
+        return {
+          type: 'completed',
+          label: 'Completed',
+          color: 'bg-green-100 text-green-700 border-green-200',
+          icon: '✅'
+        }
+      }
+      // Default for other outbound statuses
+      return {
+        type: 'other',
+        label: call.status,
+        color: 'bg-slate-100 text-slate-600 border-slate-200',
+        icon: '📞'
+      }
+    }
+
+    // For inbound calls, use answered_by_user_id (this is correct for inbound)
     // Missed call: ringing status and no answered_by_user_id
     if ((call.status === 'ringing' || call.status === 'no-answer' || call.status === 'busy') && !call.answered_by_user_id) {
       return {
@@ -272,108 +326,52 @@ export default function CallHistoryCard() {
             <p className="text-sm text-slate-400 font-medium">No calls yet</p>
           </div>
         ) : (
-          <div className="divide-y divide-slate-100">
+          <div className="space-y-3 p-4">
             {calls.map((call) => {
-              const status = getStatusInfo(call)
+              const isInbound = call.direction === 'inbound'
               return (
                 <div
                   key={call.id}
-                  className="p-3 sm:p-4 hover:bg-white/50 transition-colors"
+                  className="flex items-center justify-between p-4 bg-white/50 rounded-lg border border-slate-200 hover:border-blue-300 transition-all"
                 >
-                  <div className="flex items-start gap-3">
-                    {/* Direction Icon */}
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                      call.direction === 'inbound'
-                        ? 'bg-green-100'
-                        : 'bg-amber-100'
+                  <div className="flex items-center gap-4">
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                      isInbound ? 'bg-green-100' : 'bg-blue-100'
                     }`}>
-                      <span className="text-sm">
-                        {call.direction === 'inbound' ? '📥' : '📤'}
-                      </span>
+                      <svg className={`w-5 h-5 ${isInbound ? 'text-green-600' : 'text-blue-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                      </svg>
                     </div>
-
-                    {/* Call Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <div className="flex flex-col">
-                          {call.contact ? (
-                            <>
-                              <span className="font-bold text-sm text-slate-900">
-                                {call.contact.business_name || `${call.contact.first_name} ${call.contact.last_name}`}
-                              </span>
-                              <span className="font-mono text-xs text-slate-500">
-                                {formatPhoneNumber(call.direction === 'inbound' ? call.from_number : call.to_number)}
-                              </span>
-                            </>
-                          ) : (
-                            <span className="font-mono font-bold text-sm text-slate-900">
-                              {formatPhoneNumber(call.direction === 'inbound' ? call.from_number : call.to_number)}
-                            </span>
-                          )}
-                        </div>
-                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${status.color}`}>
-                          <span>{status.icon}</span>
-                          {status.label}
-                        </span>
-                      </div>
-
-                      {/* Answered By / Called By */}
-                      {call.answered_by_user_id && call.direction === 'inbound' && (
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-sm">
-                            <span className="text-white text-[10px] font-bold">
-                              {call.answered_by_user?.full_name
-                                ? call.answered_by_user.full_name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
-                                : '?'}
-                            </span>
-                          </div>
-                          <span className="text-xs text-slate-600">
-                            Answered by <span className="font-bold text-blue-700">
-                              {call.answered_by_user?.full_name || 'Agent'}
-                            </span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="font-semibold text-slate-900">
+                          {isInbound ? 'Inbound Call' : 'Outbound Call'}
+                        </p>
+                        {call.contact ? (
+                          <span className="text-sm text-slate-600">
+                            - {call.contact.business_name || `${call.contact.first_name} ${call.contact.last_name}`}
                           </span>
-                        </div>
-                      )}
-                      {call.answered_by_user_id && call.direction === 'outbound' && (
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <div className="w-5 h-5 rounded-full bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center shadow-sm">
-                            <span className="text-white text-[10px] font-bold">
-                              {call.answered_by_user?.full_name
-                                ? call.answered_by_user.full_name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
-                                : '?'}
-                            </span>
-                          </div>
-                          <span className="text-xs text-slate-600">
-                            Called by <span className="font-bold text-amber-700">
-                              {call.answered_by_user?.full_name || 'Agent'}
-                            </span>
+                        ) : (
+                          <span className="text-sm text-slate-600 font-mono">
+                            - {formatPhoneNumber(isInbound ? call.from_number : call.to_number)}
                           </span>
-                        </div>
-                      )}
-                      {!call.answered_by_user_id && status.type === 'missed' && (
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <div className="w-5 h-5 rounded-full bg-red-100 flex items-center justify-center">
-                            <span className="text-red-600 text-xs">✕</span>
-                          </div>
-                          <span className="text-xs text-red-600 font-medium">
-                            No answer
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Duration & Time */}
-                      <div className="flex items-center gap-3 text-xs text-slate-500">
-                        {call.duration && (
-                          <>
-                            <span className="font-mono">{formatDuration(call.duration)}</span>
-                            <span>•</span>
-                          </>
                         )}
-                        <span>{formatDateTime(call.created_at)}</span>
-                        <span>•</span>
-                        <span className="capitalize">{call.direction}</span>
                       </div>
+                      {call.answered_by_user_id && call.answered_by_user?.full_name && (
+                        <p className="text-xs text-slate-500">
+                          {isInbound ? 'Answered by' : 'Called by'} {call.answered_by_user.full_name}
+                        </p>
+                      )}
+                      <p className="text-sm text-slate-600">{formatDateTime(call.created_at)}</p>
                     </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-medium text-slate-900">{formatDuration(call)}</p>
+                    <p className={`text-sm font-medium ${
+                      call.status === 'completed' ? 'text-green-600' : 'text-slate-500'
+                    }`}>
+                      {call.status}
+                    </p>
                   </div>
                 </div>
               )

@@ -105,16 +105,33 @@ export default function Navigation({ userRole }: NavigationProps) {
       // Fetch recent unread SMS messages (last 5)
       const { data: smsConversations } = await supabase
         .from('sms_conversations')
-        .select('id, contact_name, contact_phone_number, last_message_preview, last_message_at, unread_count')
+        .select(`
+          id,
+          contact_phone_number,
+          last_message_preview,
+          last_message_at,
+          unread_count,
+          contacts:contact_id (
+            first_name,
+            last_name,
+            business_name
+          )
+        `)
         .gt('unread_count', 0)
         .order('last_message_at', { ascending: false })
         .limit(5)
 
-      smsConversations?.forEach(conv => {
+      smsConversations?.forEach((conv: any) => {
+        // Get contact name from the joined contacts table
+        const contact = conv.contacts
+        const contactName = contact
+          ? (contact.business_name || `${contact.first_name} ${contact.last_name}`.trim())
+          : conv.contact_phone_number
+
         notifs.push({
           id: `sms-${conv.id}`,
           type: 'sms',
-          title: conv.contact_name || conv.contact_phone_number,
+          title: contactName,
           body: conv.last_message_preview,
           time: new Date(conv.last_message_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           link: `/super-admin/messages?conversation=${conv.id}`
@@ -123,8 +140,8 @@ export default function Navigation({ userRole }: NavigationProps) {
 
       // Fetch recent missed calls (last 5)
       const { data: missedCalls } = await supabase
-        .from('call_history')
-        .select('id, contact_name, contact_phone, direction, status, created_at')
+        .from('calls')
+        .select('id, from_number, to_number, direction, status, created_at')
         .eq('direction', 'inbound')
         .in('status', ['no-answer', 'busy', 'failed'])
         .order('created_at', { ascending: false })
@@ -134,7 +151,7 @@ export default function Navigation({ userRole }: NavigationProps) {
         notifs.push({
           id: `call-${call.id}`,
           type: 'missed_call',
-          title: call.contact_name || call.contact_phone || 'Unknown',
+          title: call.from_number || 'Unknown',
           body: 'Missed call',
           time: new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           link: '/super-admin/calling'
