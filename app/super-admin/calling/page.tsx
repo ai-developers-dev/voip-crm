@@ -767,7 +767,8 @@ export default function CallingDashboard() {
       return
     }
 
-    console.log('📞 Attempting to answer call')
+    const callSid = incomingCall.parameters.CallSid
+    console.log('📞 Attempting to answer call:', callSid)
 
     // Get caller info from incoming call map BEFORE clearing it
     const incomingCallInfo = incomingCallMap[currentUserId]
@@ -775,6 +776,32 @@ export default function CallingDashboard() {
     const contactName = incomingCallContact?.displayName
 
     try {
+      // CLAIM FIRST - Only accept if we win the claim
+      // This prevents audio connecting then immediately disconnecting
+      console.log('🔄 Attempting to claim call BEFORE accepting', { callSid, agentId: currentUserId })
+
+      const claimResponse = await fetch('/api/twilio/claim-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callSid: callSid,
+          agentId: currentUserId
+        })
+      })
+
+      const claimResult = await claimResponse.json()
+      console.log('📥 claim-call API response', { status: claimResponse.status, result: claimResult })
+
+      if (!claimResult.success) {
+        console.log('⚠️ Another agent already claimed this call - NOT accepting')
+        // Clear incoming call UI since another agent has it
+        setIncomingCallMap({})
+        // Do NOT accept - another agent won
+        return
+      }
+
+      console.log('✅ Successfully claimed call - now accepting')
+
       // Show "Connecting..." state immediately to prevent UI gap
       setConnectingCallMap({
         [currentUserId]: { callerNumber, contactName }
@@ -783,48 +810,11 @@ export default function CallingDashboard() {
       // Clear incoming call map - connecting state will bridge the gap
       setIncomingCallMap({})
 
-      // CRITICAL FIX: Accept call FIRST to establish audio
-      // This gives us access to the Call object with parentCallSid
+      // Only accept AFTER winning the claim
       console.log('🎧 Accepting call to establish audio connection')
       acceptCall()
 
       console.log('📞 Call accepted, audio connecting...')
-
-      // Now check if we need to claim (in case another agent also answered)
-      // Use a small delay to let Twilio events propagate
-      setTimeout(async () => {
-        try {
-          const callSid = incomingCall.parameters.CallSid
-
-          console.log('🔄 Sending claim-call API request', { callSid, agentId: currentUserId })
-
-          const claimResponse = await fetch('/api/twilio/claim-call', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              callSid: callSid,
-              agentId: currentUserId
-            })
-          })
-
-          const claimResult = await claimResponse.json()
-          console.log('📥 claim-call API response', { status: claimResponse.status, result: claimResult })
-
-          if (!claimResult.success) {
-            console.log('⚠️ Another agent claimed - they will keep the call')
-            // Another agent claimed it, so disconnect our call
-            if (activeCall) {
-              activeCall.disconnect()
-            }
-            // Clear connecting state since call failed
-            setConnectingCallMap({})
-          } else {
-            console.log('✅ Successfully claimed call')
-          }
-        } catch (error) {
-          console.error('❌ Error in post-answer claim:', error)
-        }
-      }, 100)
 
     } catch (error) {
       console.error('❌ Error answering call:', error)

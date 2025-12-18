@@ -34,14 +34,36 @@ export async function POST(request: Request) {
       NumMedia
     })
 
-    // TODO: Validate Twilio signature for security
-    // const twilioSignature = request.headers.get('x-twilio-signature')
-    // const isValid = twilio.validateRequest(
-    //   process.env.TWILIO_AUTH_TOKEN!,
-    //   twilioSignature,
-    //   url,
-    //   params
-    // )
+    // Validate Twilio webhook signature for security
+    const twilioSignature = request.headers.get('x-twilio-signature')
+    if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
+      // Build the full URL that Twilio used to call us
+      const url = new URL(request.url)
+      const webhookUrl = `${url.origin}${url.pathname}`
+
+      // Convert webhookData to params object for validation
+      const params: Record<string, string> = {}
+      for (const [key, value] of Object.entries(webhookData)) {
+        params[key] = String(value)
+      }
+
+      const isValid = twilio.validateRequest(
+        process.env.TWILIO_AUTH_TOKEN,
+        twilioSignature,
+        webhookUrl,
+        params
+      )
+
+      if (!isValid) {
+        console.error('❌ Invalid Twilio signature - request rejected')
+        return new NextResponse('Forbidden', { status: 403 })
+      }
+      console.log('✅ Twilio signature validated')
+    } else if (process.env.NODE_ENV === 'production') {
+      // In production, require signature validation
+      console.error('❌ Missing Twilio signature in production')
+      return new NextResponse('Forbidden', { status: 403 })
+    }
 
     // Initialize Supabase admin client
     const adminClient = createAdminClient(

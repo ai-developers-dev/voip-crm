@@ -91,7 +91,22 @@ export async function POST(request: Request) {
   <Hangup/>
 </Response>`
 
-    // Delete from parked_calls table BEFORE redirect (so all UIs clear immediately)
+    console.log('Redirecting PSTN call to new agent:', newAgentId)
+
+    // Redirect the PSTN call from conference to the new agent FIRST
+    // Only clean up database records AFTER redirect succeeds
+    try {
+      await twilioClient.calls(pstnCallSid).update({
+        twiml: twiml,
+      })
+      console.log('✅ Call redirected to new agent:', newAgentId)
+    } catch (redirectError: any) {
+      console.error('❌ Failed to redirect call:', redirectError)
+      // Don't delete parked call record - leave it for retry
+      throw new Error(`Failed to redirect call: ${redirectError.message}`)
+    }
+
+    // Only delete from parked_calls AFTER successful redirect
     console.log('🗑️ Deleting parked call from database:', parkedCallId)
     const { error: deleteError } = await adminClient
       .from('parked_calls')
@@ -99,9 +114,10 @@ export async function POST(request: Request) {
       .eq('id', parkedCallId)
 
     if (deleteError) {
-      console.error('Error deleting parked call:', deleteError)
+      console.error('Warning: Error deleting parked call:', deleteError)
+      // Non-fatal - redirect already succeeded
     } else {
-      console.log('✅ Parked call deleted from database - all UIs should clear now')
+      console.log('✅ Parked call deleted from database')
     }
 
     // Delete active_calls entry since call is no longer parked (will ring to new agent)
@@ -113,15 +129,6 @@ export async function POST(request: Request) {
     if (deleteActiveError) {
       console.error('Warning: Failed to delete active_calls:', deleteActiveError)
     }
-
-    console.log('Redirecting PSTN call to new agent:', newAgentId)
-
-    // Redirect the PSTN call from conference to the new agent
-    await twilioClient.calls(pstnCallSid).update({
-      twiml: twiml,
-    })
-
-    console.log('Call redirected to new agent:', newAgentId)
 
     // Update the original call record in database
     if (parkedCall.call_id) {

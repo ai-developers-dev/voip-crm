@@ -190,32 +190,58 @@ export async function POST(request: Request) {
           const direction = callData?.direction
 
           if (direction === 'inbound') {
-            // Increment all inbound counters (daily, weekly, monthly, yearly)
-            await adminClient.rpc('exec_sql', {
-              sql: `
-                UPDATE public.voip_users
-                SET
-                  today_inbound_calls = today_inbound_calls + 1,
-                  weekly_inbound_calls = weekly_inbound_calls + 1,
-                  monthly_inbound_calls = monthly_inbound_calls + 1,
-                  yearly_inbound_calls = yearly_inbound_calls + 1
-                WHERE id = '${agentId}'
-              `
+            // Increment all inbound counters using safe RPC call
+            const { error: inboundError } = await adminClient.rpc('increment_inbound_calls', {
+              user_id: agentId
             })
+            if (inboundError) {
+              console.error('⚠️ Failed to increment inbound counts via RPC:', inboundError)
+              // Fallback to direct update (still safe - uses parameterized query)
+              const { data: currentUser } = await adminClient
+                .from('voip_users')
+                .select('today_inbound_calls, weekly_inbound_calls, monthly_inbound_calls, yearly_inbound_calls')
+                .eq('id', agentId)
+                .single()
+
+              if (currentUser) {
+                await adminClient
+                  .from('voip_users')
+                  .update({
+                    today_inbound_calls: (currentUser.today_inbound_calls || 0) + 1,
+                    weekly_inbound_calls: (currentUser.weekly_inbound_calls || 0) + 1,
+                    monthly_inbound_calls: (currentUser.monthly_inbound_calls || 0) + 1,
+                    yearly_inbound_calls: (currentUser.yearly_inbound_calls || 0) + 1
+                  })
+                  .eq('id', agentId)
+              }
+            }
             console.log('✅ Incremented inbound call counts (daily/weekly/monthly/yearly) for agent:', agentId)
           } else if (direction === 'outbound') {
-            // Increment all outbound counters (daily, weekly, monthly, yearly)
-            await adminClient.rpc('exec_sql', {
-              sql: `
-                UPDATE public.voip_users
-                SET
-                  today_outbound_calls = today_outbound_calls + 1,
-                  weekly_outbound_calls = weekly_outbound_calls + 1,
-                  monthly_outbound_calls = monthly_outbound_calls + 1,
-                  yearly_outbound_calls = yearly_outbound_calls + 1
-                WHERE id = '${agentId}'
-              `
+            // Increment all outbound counters using safe RPC call
+            const { error: outboundError } = await adminClient.rpc('increment_outbound_calls', {
+              user_id: agentId
             })
+            if (outboundError) {
+              console.error('⚠️ Failed to increment outbound counts via RPC:', outboundError)
+              // Fallback to direct update (still safe - uses parameterized query)
+              const { data: currentUser } = await adminClient
+                .from('voip_users')
+                .select('today_outbound_calls, weekly_outbound_calls, monthly_outbound_calls, yearly_outbound_calls')
+                .eq('id', agentId)
+                .single()
+
+              if (currentUser) {
+                await adminClient
+                  .from('voip_users')
+                  .update({
+                    today_outbound_calls: (currentUser.today_outbound_calls || 0) + 1,
+                    weekly_outbound_calls: (currentUser.weekly_outbound_calls || 0) + 1,
+                    monthly_outbound_calls: (currentUser.monthly_outbound_calls || 0) + 1,
+                    yearly_outbound_calls: (currentUser.yearly_outbound_calls || 0) + 1
+                  })
+                  .eq('id', agentId)
+              }
+            }
             console.log('✅ Incremented outbound call counts (daily/weekly/monthly/yearly) for agent:', agentId)
           }
         } catch (countError) {

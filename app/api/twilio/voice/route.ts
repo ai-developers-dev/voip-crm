@@ -24,6 +24,47 @@ export async function POST(request: Request) {
     console.log('To:', to)
     console.log('====================')
 
+    // Validate Twilio webhook signature for security
+    const twilioSignature = request.headers.get('x-twilio-signature')
+    if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
+      const url = new URL(request.url)
+      const webhookUrl = `${url.origin}${url.pathname}`
+
+      // Convert formData to params object for validation
+      const params: Record<string, string> = {}
+      for (const [key, value] of formData.entries()) {
+        params[key] = String(value)
+      }
+
+      const isValid = twilio.validateRequest(
+        process.env.TWILIO_AUTH_TOKEN,
+        twilioSignature,
+        webhookUrl,
+        params
+      )
+
+      if (!isValid) {
+        console.error('❌ Invalid Twilio signature - request rejected')
+        const twiml = new VoiceResponse()
+        twiml.say('Access denied.')
+        twiml.hangup()
+        return new NextResponse(twiml.toString(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml' }
+        })
+      }
+      console.log('✅ Twilio signature validated')
+    } else if (process.env.NODE_ENV === 'production') {
+      console.error('❌ Missing Twilio signature in production')
+      const twiml = new VoiceResponse()
+      twiml.say('Access denied.')
+      twiml.hangup()
+      return new NextResponse(twiml.toString(), {
+        status: 200,
+        headers: { 'Content-Type': 'text/xml' }
+      })
+    }
+
     console.log('🔐 Creating Supabase admin client...')
     console.log('SUPABASE_URL:', process.env.NEXT_PUBLIC_SUPABASE_URL)
     console.log('SERVICE_ROLE_KEY exists:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
@@ -33,14 +74,30 @@ export async function POST(request: Request) {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     )
 
-    console.log('🔍 Querying for available agents...')
-    console.log('Query: voip_users where is_available=true AND role IN (agent, super_admin)')
+    // First, find the organization by the Twilio number being called
+    const { data: organization, error: orgError } = await adminClient
+      .from('organizations')
+      .select('id, name')
+      .eq('twilio_number', to)
+      .single()
 
-    // Find ALL available agents (multi-agent simultaneous ring)
+    if (orgError || !organization) {
+      console.error('❌ Organization not found for Twilio number:', to)
+      // Fall back to default organization if number not found
+    }
+
+    const organizationId = organization?.id || '9abcaa0f-5e39-41f5-b269-2b5872720768'
+    console.log('🏢 Organization for this call:', organization?.name || 'default', organizationId)
+
+    console.log('🔍 Querying for available agents in this organization...')
+    console.log('Query: voip_users where is_available=true AND role IN (agent, super_admin) AND organization_id =', organizationId)
+
+    // Find ALL available agents in THIS ORGANIZATION (multi-agent simultaneous ring)
     const { data: availableAgents, error: agentError } = await adminClient
       .from('voip_users')
       .select('*')
       .eq('is_available', true)
+      .eq('organization_id', organizationId)
       .in('role', ['agent', 'super_admin'])
 
     console.log('📊 Query results:', {
@@ -109,10 +166,6 @@ export async function POST(request: Request) {
     } else {
       console.log('✅ Call claim created')
     }
-
-    // Get organization_id (use first available agent's org, or default org)
-    const organizationId = availableAgents[0]?.organization_id || '9abcaa0f-5e39-41f5-b269-2b5872720768'
-    console.log('🏢 Using organization_id:', organizationId)
 
     // Create a call record in the database (not assigned to anyone yet)
     console.log('💾 Creating call record in database...')
