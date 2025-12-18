@@ -774,52 +774,59 @@ export default function CallingDashboard() {
     const incomingCallInfo = incomingCallMap[currentUserId]
     const callerNumber = incomingCallInfo?.callerNumber || incomingCall.parameters.From
     const contactName = incomingCallContact?.displayName
+    const isTransfer = incomingCallInfo?.isTransfer || false
 
-    try {
-      // CLAIM FIRST - Only accept if we win the claim
-      // This prevents audio connecting then immediately disconnecting
-      console.log('🔄 Attempting to claim call BEFORE accepting', { callSid, agentId: currentUserId })
+    // Show "Connecting..." state immediately to prevent UI gap
+    setConnectingCallMap({
+      [currentUserId]: { callerNumber, contactName }
+    })
 
-      const claimResponse = await fetch('/api/twilio/claim-call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          callSid: callSid,
-          agentId: currentUserId
+    // Clear incoming call map - connecting state will bridge the gap
+    setIncomingCallMap({})
+
+    // ACCEPT FIRST for faster audio connection
+    // For transfers: No claim needed (only one agent receives the call)
+    // For regular calls: Claim in background after accepting
+    console.log('🎧 Accepting call IMMEDIATELY to establish audio connection', { isTransfer })
+    acceptCall()
+
+    console.log('📞 Call accepted, audio connecting...')
+
+    // For regular multi-agent calls, claim in background
+    // If claim fails, the call will disconnect (rare race condition)
+    if (!isTransfer) {
+      try {
+        console.log('🔄 Claiming call in background', { callSid, agentId: currentUserId })
+
+        const claimResponse = await fetch('/api/twilio/claim-call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            callSid: callSid,
+            agentId: currentUserId
+          })
         })
-      })
 
-      const claimResult = await claimResponse.json()
-      console.log('📥 claim-call API response', { status: claimResponse.status, result: claimResult })
+        const claimResult = await claimResponse.json()
+        console.log('📥 claim-call API response', { status: claimResponse.status, result: claimResult })
 
-      if (!claimResult.success) {
-        console.log('⚠️ Another agent already claimed this call - NOT accepting')
-        // Clear incoming call UI since another agent has it
-        setIncomingCallMap({})
-        // Do NOT accept - another agent won
-        return
+        if (!claimResult.success) {
+          console.log('⚠️ Another agent claimed this call - disconnecting')
+          // Another agent won the race - disconnect our call
+          // This is rare but handles the edge case
+          if (activeCall) {
+            activeCall.disconnect()
+          }
+          setConnectingCallMap({})
+        } else {
+          console.log('✅ Successfully claimed call')
+        }
+      } catch (error) {
+        console.error('❌ Error claiming call:', error)
+        // Don't disconnect on error - let the call proceed
       }
-
-      console.log('✅ Successfully claimed call - now accepting')
-
-      // Show "Connecting..." state immediately to prevent UI gap
-      setConnectingCallMap({
-        [currentUserId]: { callerNumber, contactName }
-      })
-
-      // Clear incoming call map - connecting state will bridge the gap
-      setIncomingCallMap({})
-
-      // Only accept AFTER winning the claim
-      console.log('🎧 Accepting call to establish audio connection')
-      acceptCall()
-
-      console.log('📞 Call accepted, audio connecting...')
-
-    } catch (error) {
-      console.error('❌ Error answering call:', error)
-      setIncomingCallMap({})
-      setConnectingCallMap({})
+    } else {
+      console.log('⏭️ Skipping claim for transfer/unpark call')
     }
   }
 

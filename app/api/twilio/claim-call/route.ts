@@ -48,37 +48,37 @@ export async function POST(request: Request) {
 
     console.log('✅ CLAIM SUCCESS:', { callSid, agentId })
 
-    // CRITICAL: Delete ALL active_calls rows for this call IMMEDIATELY
-    // This clears other agents' incoming call UI via real-time DELETE events
-    // Must happen BEFORE acceptCall() is called in the frontend
-    console.log('🧹 IMMEDIATELY deleting ALL active_calls for call:', callSid)
-    const { error: deleteError } = await adminClient
-      .from('active_calls')
-      .delete()
-      .eq('call_sid', callSid)
+    // Run cleanup operations in parallel (non-blocking for faster response)
+    // These clear other agents' UI but don't need to complete before responding
+    Promise.all([
+      // Delete ALL active_calls rows for this call
+      adminClient
+        .from('active_calls')
+        .delete()
+        .eq('call_sid', callSid)
+        .then(({ error }) => {
+          if (error) {
+            console.error('❌ Failed to delete active_calls:', error)
+          } else {
+            console.log('✅ DELETED all active_calls')
+          }
+        }),
+      // Broadcast answered event for ring coordination
+      adminClient
+        .from('ring_events')
+        .insert({
+          call_sid: callSid,
+          agent_id: agentId,
+          event_type: 'answered'
+        })
+        .then(({ error }) => {
+          if (error) {
+            console.error('Warning: Failed to broadcast ring event:', error)
+          }
+        })
+    ]).catch(err => console.error('Cleanup error:', err))
 
-    if (deleteError) {
-      console.error('❌ CRITICAL: Failed to delete active_calls:', deleteError)
-    } else {
-      console.log('✅ DELETED all active_calls - other agents\' screens will clear NOW')
-    }
-
-    // Broadcast answered event for ring coordination
-    const { error: ringError } = await adminClient
-      .from('ring_events')
-      .insert({
-        call_sid: callSid,
-        agent_id: agentId,
-        event_type: 'answered'
-      })
-
-    if (ringError) {
-      console.error('Warning: Failed to broadcast ring event:', ringError)
-    }
-
-    // NOTE: The answering agent's active_calls row and voip_users update
-    // will be handled by update-user-call when Twilio accept event fires
-
+    // Return immediately - don't wait for cleanup
     return NextResponse.json({
       success: true,
       claimedBy: agentId
