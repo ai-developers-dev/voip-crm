@@ -65,10 +65,36 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
   const activeCallContactRef = useRef<ContactInfo | null>(null)
   const deviceRef = useRef<Device | null>(null)
   const userIdRef = useRef<string | null>(null)
+  const initializationRef = useRef<boolean>(false) // Prevent double init in Strict Mode
+  const ringtoneRef = useRef<HTMLAudioElement | null>(null)
+
+  // Initialize ringtone audio element
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      ringtoneRef.current = new Audio('/ringtone.mp3')
+      ringtoneRef.current.loop = true
+      ringtoneRef.current.volume = 0.5
+    }
+    return () => {
+      if (ringtoneRef.current) {
+        ringtoneRef.current.pause()
+        ringtoneRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
+    // Prevent double initialization in React Strict Mode
+    // Only skip if we actually have a valid device already
+    if (initializationRef.current && deviceRef.current) {
+      console.log('⚠️ Skipping duplicate Twilio initialization (device exists)')
+      return
+    }
+    initializationRef.current = true
+
     let mounted = true
     let refreshTimer: NodeJS.Timeout | null = null
+    let registrationTimer: NodeJS.Timeout | null = null
 
     async function refreshToken() {
       try {
@@ -104,6 +130,8 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
           logLevel: 1,
           codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
           tokenRefreshMs: 30000,
+          // Use specific edge locations for faster connection
+          edge: ['ashburn', 'umatilla', 'roaming'],
         })
 
         // Set up event listeners
@@ -162,92 +190,74 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
           if (mounted) setError('Token expired - please refresh the page')
         })
 
-        twilioDevice.on('incoming', async (call) => {
+        twilioDevice.on('incoming', (call) => {
           console.log('📞 INCOMING CALL from:', call.parameters.From)
           if (mounted) {
             const callSid = call.parameters.CallSid
             const phoneNumber = call.parameters.From
 
-            // Lookup contact by phone number
-            try {
-              const apiUrl = `/api/contacts/lookup-by-phone?phone=${encodeURIComponent(phoneNumber)}`
-              console.log('🔍 Looking up contact for:', phoneNumber)
-              console.log('   API URL:', apiUrl)
-
-              const response = await fetch(apiUrl)
-
-              console.log('📡 API Response status:', response.status, response.statusText)
-
-              if (!response.ok) {
-                const errorText = await response.text()
-                console.error('❌ API request failed:', errorText)
-                setIncomingCallContact(null)
-                return
-              }
-
-              const data = await response.json()
-              console.log('📦 API Response data:', data)
-
-              if (data.contact) {
-                const fullName = `${data.contact.first_name} ${data.contact.last_name}`
-                const displayName = data.contact.business_name || fullName
-
-                const contactInfo = {
-                  id: data.contact.id,
-                  name: fullName,
-                  displayName: displayName,
-                  firstName: data.contact.first_name,
-                  lastName: data.contact.last_name,
-                  businessName: data.contact.business_name
-                }
-
-                console.log('✅ Contact found! Setting state:', contactInfo)
-                setIncomingCallContact(contactInfo)
-                incomingCallContactRef.current = contactInfo // Keep ref in sync
-                console.log('✅ incomingCallContact state updated to:', contactInfo.displayName)
-              } else {
-                setIncomingCallContact(null)
-                incomingCallContactRef.current = null // Keep ref in sync
-                console.log('❓ Unknown caller - no contact in database')
-              }
-            } catch (error) {
-              console.error('❌ EXCEPTION during contact lookup:', error)
-              console.error('   Error details:', {
-                message: error instanceof Error ? error.message : String(error),
-                stack: error instanceof Error ? error.stack : undefined
+            // Play ringtone for incoming call
+            if (ringtoneRef.current) {
+              ringtoneRef.current.currentTime = 0
+              ringtoneRef.current.play().catch(err => {
+                console.log('🔇 Ringtone blocked (needs user interaction):', err.message)
               })
-              setIncomingCallContact(null)
-              incomingCallContactRef.current = null // Keep ref in sync
             }
 
+            // Show incoming call UI IMMEDIATELY
             setIncomingCall(call)
 
-            call.on('accept', async () => {
-              console.log('✅ Call accepted by Twilio:', callSid)
-              if (mounted) {
-                if (userIdRef.current) {
-                  try {
-                    console.log('📥 Updating database - setting current_call_id for agent')
-                    const response = await fetch('/api/twilio/update-user-call', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        callSid: callSid,
-                        agentId: userIdRef.current,
-                        action: 'start'
-                      })
-                    })
-                    const result = await response.json()
-                    if (result.success) {
-                      console.log('✅ Database updated - current_call_id set, ALL users will see active call!')
-                    } else {
-                      console.error('❌ Failed to update database:', result.error)
-                    }
-                  } catch (error) {
-                    console.error('❌ Error updating database:', error)
-                  }
-                }
+            // Lookup contact in background (non-blocking for faster UI)
+            const apiUrl = `/api/contacts/lookup-by-phone?phone=${encodeURIComponent(phoneNumber)}`
+            console.log('🔍 Looking up contact for:', phoneNumber)
 
+            fetch(apiUrl)
+              .then(response => {
+                if (!response.ok) {
+                  throw new Error(`API request failed: ${response.status}`)
+                }
+                return response.json()
+              })
+              .then(data => {
+                if (!mounted) return
+
+                if (data.contact) {
+                  const fullName = `${data.contact.first_name} ${data.contact.last_name}`
+                  const displayName = data.contact.business_name || fullName
+
+                  const contactInfo = {
+                    id: data.contact.id,
+                    name: fullName,
+                    displayName: displayName,
+                    firstName: data.contact.first_name,
+                    lastName: data.contact.last_name,
+                    businessName: data.contact.business_name
+                  }
+
+                  console.log('✅ Contact found:', contactInfo.displayName)
+                  setIncomingCallContact(contactInfo)
+                  incomingCallContactRef.current = contactInfo
+                } else {
+                  console.log('❓ Unknown caller - no contact in database')
+                  setIncomingCallContact(null)
+                  incomingCallContactRef.current = null
+                }
+              })
+              .catch(error => {
+                console.error('❌ Contact lookup error:', error)
+                setIncomingCallContact(null)
+                incomingCallContactRef.current = null
+              })
+
+            call.on('accept', () => {
+              console.log('✅ Call accepted by Twilio:', callSid)
+              // Stop ringtone when call is answered
+              if (ringtoneRef.current) {
+                ringtoneRef.current.pause()
+                ringtoneRef.current.currentTime = 0
+              }
+              if (mounted) {
+                // Update UI state FIRST for immediate feedback
                 const newCallState: CallState = {
                   call,
                   callSid,
@@ -272,11 +282,37 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
                 activeCallContactRef.current = currentContact // Keep ref in sync
                 setIncomingCallContact(null)
                 incomingCallContactRef.current = null // Keep ref in sync
+
+                // Update database in background (non-blocking for faster audio)
+                if (userIdRef.current) {
+                  fetch('/api/twilio/update-user-call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      callSid: callSid,
+                      agentId: userIdRef.current,
+                      action: 'start'
+                    })
+                  }).then(response => response.json())
+                    .then(result => {
+                      if (result.success) {
+                        console.log('✅ Database updated - current_call_id set')
+                      } else {
+                        console.error('❌ Failed to update database:', result.error)
+                      }
+                    })
+                    .catch(error => console.error('❌ Error updating database:', error))
+                }
               }
             })
 
             call.on('disconnect', async () => {
               console.log('📴 Call disconnected:', callSid)
+              // Stop ringtone if still playing
+              if (ringtoneRef.current) {
+                ringtoneRef.current.pause()
+                ringtoneRef.current.currentTime = 0
+              }
               if (mounted) {
                 if (userIdRef.current) {
                   try {
@@ -342,6 +378,11 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
 
             call.on('reject', () => {
               console.log('Call rejected:', callSid)
+              // Stop ringtone when call is rejected
+              if (ringtoneRef.current) {
+                ringtoneRef.current.pause()
+                ringtoneRef.current.currentTime = 0
+              }
               if (mounted) {
                 setIncomingCall(null)
                 setIncomingCallContact(null)
@@ -351,6 +392,11 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
 
             call.on('cancel', () => {
               console.log('📴 Call canceled (caller hung up before answer):', callSid)
+              // Stop ringtone when caller hangs up
+              if (ringtoneRef.current) {
+                ringtoneRef.current.pause()
+                ringtoneRef.current.currentTime = 0
+              }
               if (mounted) {
                 setIncomingCall(null)
                 setIncomingCallContact(null)
@@ -360,17 +406,54 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
           }
         })
 
-        // Register the device
-        await twilioDevice.register()
-
+        // Store device reference before registration
         if (mounted) {
           setDevice(twilioDevice)
           deviceRef.current = twilioDevice
-
-          const REFRESH_INTERVAL = 3.5 * 60 * 60 * 1000
-          refreshTimer = setInterval(refreshToken, REFRESH_INTERVAL)
-          console.log('⏲️ Periodic token refresh scheduled every 3.5 hours')
         }
+
+        // Function to register device (may need to wait for user gesture)
+        const registerDevice = async () => {
+          try {
+            console.log('🔄 Attempting to register Twilio device...')
+            await twilioDevice.register()
+
+            if (mounted) {
+              const REFRESH_INTERVAL = 3.5 * 60 * 60 * 1000
+              refreshTimer = setInterval(refreshToken, REFRESH_INTERVAL)
+              console.log('⏲️ Periodic token refresh scheduled every 3.5 hours')
+            }
+          } catch (regError: any) {
+            console.error('❌ Device registration failed:', regError.message)
+            // If registration fails, it might be due to AudioContext - will retry on user interaction
+            if (mounted) setError('Click anywhere to enable calling')
+          }
+        }
+
+        // Wait a short moment for any page interactions, then register
+        // This helps avoid AudioContext issues on initial page load
+        registrationTimer = setTimeout(() => {
+          if (mounted) {
+            registerDevice()
+          }
+        }, 500)
+
+        // Also set up a click handler to retry registration if needed
+        const handleUserInteraction = async () => {
+          if (deviceRef.current && deviceRef.current.state !== 'registered') {
+            console.log('👆 User interaction detected, registering device...')
+            try {
+              await deviceRef.current.register()
+              if (mounted) setError(null)
+            } catch (err) {
+              console.error('❌ Registration retry failed:', err)
+            }
+          }
+        }
+
+        document.addEventListener('click', handleUserInteraction, { once: true })
+        document.addEventListener('keydown', handleUserInteraction, { once: true })
+
       } catch (err: any) {
         console.error('❌ TWILIO DEVICE INITIALIZATION ERROR:', err)
         if (mounted) setError(err.message)
@@ -386,6 +469,10 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
     return () => {
       mounted = false
 
+      if (registrationTimer) {
+        clearTimeout(registrationTimer)
+      }
+
       if (refreshTimer) {
         clearInterval(refreshTimer)
         console.log('🧹 Cleared periodic token refresh timer')
@@ -398,7 +485,11 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
         console.log('🧹 TwilioDeviceProvider unmounting - cleaning up device')
         deviceRef.current.unregister()
         deviceRef.current.destroy()
+        deviceRef.current = null // Clear ref so re-mount can reinitialize
       }
+
+      // Reset initialization flag so component can reinitialize if remounted
+      initializationRef.current = false
     }
   }, [])
 
