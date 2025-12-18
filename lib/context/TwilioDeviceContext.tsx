@@ -67,6 +67,42 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
   const userIdRef = useRef<string | null>(null)
   const initializationRef = useRef<boolean>(false) // Prevent double init in Strict Mode
   const ringtoneRef = useRef<HTMLAudioElement | null>(null)
+  const audioPrewarmedRef = useRef<boolean>(false) // Track if audio permissions were pre-acquired
+
+  // Pre-warm microphone permissions on first user interaction
+  // This eliminates the getUserMedia delay when answering calls
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const prewarmAudio = async () => {
+      if (audioPrewarmedRef.current) return
+      audioPrewarmedRef.current = true
+
+      try {
+        console.log('🎤 Pre-warming microphone permissions...')
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        // Immediately stop the tracks - we just needed to get permission
+        stream.getTracks().forEach(track => track.stop())
+        console.log('✅ Microphone permissions pre-acquired - calls will connect faster')
+      } catch (err) {
+        console.log('⚠️ Could not pre-warm microphone:', err)
+        audioPrewarmedRef.current = false // Allow retry
+      }
+    }
+
+    // Pre-warm on first user interaction
+    const handleInteraction = () => {
+      prewarmAudio()
+    }
+
+    document.addEventListener('click', handleInteraction, { once: true })
+    document.addEventListener('keydown', handleInteraction, { once: true })
+
+    return () => {
+      document.removeEventListener('click', handleInteraction)
+      document.removeEventListener('keydown', handleInteraction)
+    }
+  }, [])
 
   // Initialize ringtone audio element
   useEffect(() => {
@@ -126,18 +162,30 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
         userIdRef.current = data.identity
 
         // Create and setup device with token refresh configuration
+        // NOTE: Omitting 'edge' config lets Twilio use Global Low Latency routing
+        // which automatically selects the closest edge for faster connections
         const twilioDevice = new Device(data.token, {
           logLevel: 1,
           codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
           tokenRefreshMs: 30000,
-          // Use specific edge locations for faster connection
-          edge: ['ashburn', 'umatilla', 'roaming'],
         })
 
         // Set up event listeners
-        twilioDevice.on('registered', () => {
+        twilioDevice.on('registered', async () => {
           console.log('✅ Twilio Device registered and ready to receive calls')
           if (mounted) setIsRegistered(true)
+
+          // Pre-set audio input device right after registration for faster call acceptance
+          try {
+            const inputDevices = await navigator.mediaDevices.enumerateDevices()
+            const audioInputs = inputDevices.filter(d => d.kind === 'audioinput')
+            if (audioInputs.length > 0 && audioInputs[0].deviceId && twilioDevice.audio) {
+              await twilioDevice.audio.setInputDevice(audioInputs[0].deviceId)
+              console.log('🎤 Input device pre-configured for faster call acceptance')
+            }
+          } catch (err) {
+            console.log('⚠️ Could not pre-configure input device:', err)
+          }
         })
 
         twilioDevice.on('unregistered', () => {
@@ -495,6 +543,7 @@ export function TwilioDeviceProvider({ children }: { children: ReactNode }) {
 
   const acceptCall = () => {
     if (incomingCall) {
+      // Accept immediately - audio device should already be set from registration
       incomingCall.accept()
     }
   }
