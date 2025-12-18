@@ -68,6 +68,7 @@ export default function CallingDashboard() {
   const upsertActiveCallFromActiveRow = useCallActiveStore(state => state.upsertFromActiveCallRow)
   const removeActiveCallByCallSid = useCallActiveStore(state => state.removeByCallSid)
   const [optimisticTransferMap, setOptimisticTransferMap] = useState<Record<string, { callerNumber: string, isLoading: boolean }>>({}) // Show "transferring..." immediately
+  const [connectingCallMap, setConnectingCallMap] = useState<Record<string, { callerNumber: string, contactName?: string }>>({}) // Show "connecting..." while audio establishes
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null) // Track current user's role
   const [callCountsByUser, setCallCountsByUser] = useState<Record<string, { incoming: number, outbound: number }>>({}) // Today's call counts per user
   const supabase = useMemo(() => createClient(), [])
@@ -738,6 +739,19 @@ export default function CallingDashboard() {
       // This prevents timing issues where cleanup clears the ref before the new call arrives
       console.log('🧹 Cleared incoming call map (call answered/ended)')
     }
+
+    // Clear "Connecting..." state when active call is established
+    if (activeCall && currentUserId) {
+      setConnectingCallMap(prev => {
+        if (prev[currentUserId]) {
+          console.log('✅ Active call established - clearing connecting state')
+          const updated = { ...prev }
+          delete updated[currentUserId]
+          return updated
+        }
+        return prev
+      })
+    }
   }, [incomingCall, activeCall, users, pendingTransferTo, processedTransferCallSids, currentUserId])
 
   const handleAnswerCall = async () => {
@@ -755,13 +769,26 @@ export default function CallingDashboard() {
 
     console.log('📞 Attempting to answer call')
 
+    // Get caller info from incoming call map BEFORE clearing it
+    const incomingCallInfo = incomingCallMap[currentUserId]
+    const callerNumber = incomingCallInfo?.callerNumber || incomingCall.parameters.From
+    const contactName = incomingCallContact?.displayName
+
     try {
+      // Show "Connecting..." state immediately to prevent UI gap
+      setConnectingCallMap({
+        [currentUserId]: { callerNumber, contactName }
+      })
+
+      // Clear incoming call map - connecting state will bridge the gap
+      setIncomingCallMap({})
+
       // CRITICAL FIX: Accept call FIRST to establish audio
       // This gives us access to the Call object with parentCallSid
       console.log('🎧 Accepting call to establish audio connection')
-      await acceptCall()
+      acceptCall()
 
-      console.log('📞 Call accepted, audio connected')
+      console.log('📞 Call accepted, audio connecting...')
 
       // Now check if we need to claim (in case another agent also answered)
       // Use a small delay to let Twilio events propagate
@@ -789,6 +816,8 @@ export default function CallingDashboard() {
             if (activeCall) {
               activeCall.disconnect()
             }
+            // Clear connecting state since call failed
+            setConnectingCallMap({})
           } else {
             console.log('✅ Successfully claimed call')
           }
@@ -797,11 +826,10 @@ export default function CallingDashboard() {
         }
       }, 100)
 
-      setIncomingCallMap({})
-
     } catch (error) {
       console.error('❌ Error answering call:', error)
       setIncomingCallMap({})
+      setConnectingCallMap({})
     }
   }
 
@@ -1223,6 +1251,7 @@ export default function CallingDashboard() {
                   }
                   incomingCall={incomingCallMap[user.id]}
                   optimisticTransfer={optimisticTransferMap[user.id]}
+                  connectingCall={connectingCallMap[user.id]}
                   onAnswerCall={
                     // Pass callback if this user has an incoming call (regular or transfer)
                     incomingCallMap[user.id]
